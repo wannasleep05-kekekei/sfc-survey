@@ -28,6 +28,21 @@ class Paper:
     sources: list = field(default_factory=list)   # 由来（openalex, cinii, ...）
     ids: dict = field(default_factory=dict)       # 各ソースの原ID
 
+    # --- ILL と本文到達に必要な書誌の細部 ---------------------------------
+    # 巻号ページが無いと文献複写依頼が出せず、契約データベースの収録範囲
+    # （何年から読めるか／直近何年が読めないか）とも突き合わせられない。
+    volume: str = ""
+    issue: str = ""
+    pages: str = ""              # "582-603" 形式
+    isbn: str = ""
+    ncid: str = ""               # CiNii Books の書誌ID。国内所蔵の照会キー
+    repo_url: str = ""           # 機関リポジトリ等、OA 本文が置かれている書誌ページ
+
+    # --- 確認範囲 ---------------------------------------------------------
+    # 「書誌だけ見た」のか「本文を読んだ」のかは、報告時に必ず書き分ける必要が
+    # ある。推測を確認済みとして混ぜないための欄。`sfc-search verified` で記録。
+    verified: dict = field(default_factory=dict)   # {level, note, date}
+
     def key(self):
         if self.doi:
             return ("doi", self.doi)
@@ -41,6 +56,33 @@ class Paper:
             return ""
         head = ", ".join(self.authors[:limit])
         return head + ("…" if len(self.authors) > limit else "")
+
+    def is_book(self):
+        return (self.type or "").lower() in ("book", "book-chapter", "図書")
+
+    def locator(self):
+        """"47(5), 582-603" のような巻号ページ表記。無い要素は省く。"""
+        bits = ""
+        if self.volume:
+            bits = self.volume
+            if self.issue:
+                bits += f"({self.issue})"
+        elif self.issue:
+            bits = f"no.{self.issue}"
+        if self.pages:
+            bits = f"{bits}, {self.pages}" if bits else f"p.{self.pages}"
+        return bits
+
+
+# OA 本文が置かれている可能性が高いホストの断片。
+# 機関リポジトリ（WEKO）や J-STAGE は書誌ページの <meta citation_pdf_url> に
+# 本文 PDF を明示するので、ここを掴めれば Unpaywall が空振りしても本文に届く。
+# 実測（2026-07-27）: rikkyo.repo.nii.ac.jp / repository.dl.itc.u-tokyo.ac.jp とも
+# citation_pdf_url を出す。逆に出版社の契約サイトは絶対に入れない。
+REPO_HOST_HINTS = (
+    ".repo.nii.ac.jp", "repository.", "repo.", "irdb.nii.ac.jp",
+    "id.nii.ac.jp", "jstage.jst.go.jp", "dl.ndl.go.jp", "ir.",
+)
 
 
 def norm_doi(raw):
@@ -107,6 +149,17 @@ def merge(base, other):
     if other.is_oa and not base.is_oa:
         base.is_oa = True
     base.oa_url = base.oa_url or other.oa_url
+
+    # 巻号ページ・識別子は「持っている方を採る」。ソースごとに欠落箇所が違うので、
+    # 統合してはじめて ILL に出せる形になることが多い。
+    base.volume = base.volume or other.volume
+    base.issue = base.issue or other.issue
+    base.pages = base.pages or other.pages
+    base.isbn = base.isbn or other.isbn
+    base.ncid = base.ncid or other.ncid
+    base.repo_url = base.repo_url or other.repo_url
+    if other.verified and not base.verified:
+        base.verified = other.verified
 
     if len(other.authors) > len(base.authors):
         base.authors = other.authors

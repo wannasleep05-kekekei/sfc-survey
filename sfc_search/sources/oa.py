@@ -16,7 +16,7 @@ import html
 import urllib.parse
 
 from .. import http, config
-from ..model import norm_doi
+from ..model import norm_doi, REPO_HOST_HINTS
 
 UNPAYWALL = "https://api.unpaywall.org/v2"
 
@@ -33,10 +33,13 @@ def _is_paywalled_host(u):
     return any(h in low for h in _PAYWALLED_HINTS)
 
 
-def resolve(paper):
-    """Unpaywall で OA 本文 URL を解決し、paper を更新する。"""
-    if paper.oa_url:
-        return paper.oa_url
+def _is_repo_host(u):
+    low = (u or "").lower()
+    return any(h in low for h in REPO_HOST_HINTS)
+
+
+def _unpaywall(paper):
+    """Unpaywall に DOI で問い合わせる。OA 本文 URL か空文字を返す。"""
     if not paper.doi:
         return ""
     email = config.require_contact()
@@ -50,22 +53,94 @@ def resolve(paper):
         paper.is_oa = True
     best = data.get("best_oa_location") or {}
     u = best.get("url_for_pdf") or best.get("url") or ""
-    if u and not _is_paywalled_host(u):
+    return u if (u and not _is_paywalled_host(u)) else ""
+
+
+def resolve(paper):
+    """
+    OA 本文 URL を解決し、paper を更新する。2段構えにしている。
+
+      1. Unpaywall（DOI 必須）
+      2. 機関リポジトリ / J-STAGE の書誌ページから citation_pdf_url を読む
+
+    2 が要る理由: Unpaywall は JaLC DOI と日本の機関リポジトリをほとんど
+    カバーしていない。実測（2026-07-27）では、全文 PDF が誰でも落とせる
+    東京大学の博士論文（doi:10.15083/0002006211, 282頁）も、立教大学リポジトリの
+    紀要論文も、Unpaywall 経由では `no_oa` と判定された。CiNii / NDL が返す
+    リポジトリの書誌ページを見に行けば、どちらも citation_pdf_url で本文に届く。
+
+    契約フルテキストのホスト（_PAYWALLED_HINTS）には 1 も 2 も踏み込まない。
+    """
+    if paper.oa_url:
+        return paper.oa_url
+
+    u = _unpaywall(paper)
+    if u:
         paper.oa_url = u
-    return paper.oa_url
+        return u
+
+    # リポジトリの書誌ページ候補。CiNii/NDL が拾った repo_url を優先する。
+    for cand in (paper.repo_url, paper.landing_url):
+        if not cand or not _is_repo_host(cand) or _is_paywalled_host(cand):
+            continue
+        try:
+            page, final = http.get(cand)
+        except Exception:
+            continue
+        pdf = _find_pdf(page, final)
+        if pdf and not _is_paywalled_host(pdf):
+            paper.oa_url = pdf
+            paper.is_oa = True
+            return pdf
+    return ""
+
+
+# 本文ではなく要旨・審査結果だけの PDF に付くファイル名の断片。
+# 実測: 東大の博士論文は本文 A37476.pdf のほかに A37476_abstract.pdf と
+# A37476_review.pdf を同じ書誌ページに並べており、順番だけで選ぶと取り違える。
+_NOT_FULLTEXT = ("abstract", "summary", "review", "yoshi", "shinsa",
+                 "要旨", "要約", "審査", "内容の要旨")
+
+
+def _pdf_candidates(page_html, base_url):
+    """書誌ページ内の PDF 候補 URL を出現順に返す。"""
+    out = []
+    for m in re.finditer(
+            r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)',
+            page_html, re.I):
+        out.append(m.group(1))
+    for m in re.finditer(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']citation_pdf_url',
+            page_html, re.I):
+        out.append(m.group(1))
+    if not out:
+        m = re.search(r'href=["\']([^"\']+\.pdf[^"\']*)["\']', page_html, re.I)
+        if m:
+            out.append(m.group(1))
+    seen, clean = set(), []
+    for u in out:
+        full = urllib.parse.urljoin(base_url, html.unescape(u))
+        if full not in seen:
+            seen.add(full)
+            clean.append(full)
+    return clean
 
 
 def _find_pdf(page_html, base_url):
-    m = (re.search(r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)',
-                   page_html, re.I)
-         or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']citation_pdf_url',
-                      page_html, re.I))
-    if m:
-        return urllib.parse.urljoin(base_url, html.unescape(m.group(1)))
-    m = re.search(r'href=["\']([^"\']+\.pdf[^"\']*)["\']', page_html, re.I)
-    if m:
-        return urllib.parse.urljoin(base_url, html.unescape(m.group(1)))
-    return None
+    """
+    書誌ページから本文 PDF を1つ選ぶ。
+
+    要旨・審査結果らしいファイル名は後回しにする。全部それらしければ
+    先頭を返す（取り違えるより取らない方が良い場面は呼び出し側で判断する）。
+    """
+    cands = _pdf_candidates(page_html, base_url)
+    if not cands:
+        return None
+    for u in cands:
+        name = u.rsplit("/", 1)[-1].lower()
+        if not any(k in name for k in _NOT_FULLTEXT):
+            return u
+    return cands[0]
 
 
 def _safe_name(s, maxlen=90):
