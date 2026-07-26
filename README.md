@@ -20,7 +20,10 @@ ill       →  残りは文献複写依頼へ
 
 ## セットアップ
 
-Python 3.8 以上。外部依存はありません。
+**プログラミングが初めての方は [はじめかた（SETUP.md）](SETUP.md) を読んでください。**
+GitHub の知識も git も不要で、ZIP をダウンロードするところから順に説明しています。
+
+以下は慣れている方向けです。Python 3.8 以上、外部依存はありません。
 
 ```bash
 git clone https://github.com/wannasleep05-kekekei/sfc-survey
