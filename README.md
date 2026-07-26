@@ -24,7 +24,7 @@ Python 3.8 以上。外部依存はありません。
 
 ```bash
 git clone https://github.com/wannasleep05-kekekei/sfc-survey
-cd sfc-search-tools
+cd sfc-survey
 ./sfc-search config --contact yourname@keio.jp
 ```
 
