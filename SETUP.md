@@ -150,7 +150,7 @@ User-Agent : sfc-search-tools/0.1 (+https://github.com/...; contact: 自分の�
 
 ---
 
-## 使ってみる
+## 使ってみる(Claude Code使える人は読み飛ばしてok)
 
 ### まず検索
 
