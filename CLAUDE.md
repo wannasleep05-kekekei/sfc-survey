@@ -65,6 +65,21 @@ Claude Code などのエージェントがこのリポジトリで作業する�
 | `--open` の番号 | 直近検索結果の**行番号**。README の `1-10` は例示にすぎず、実件数は `holdings` 末尾の「まとめて開く」行が提案する。その数字を使うこと |
 | 書評の混入 | 図書を書名で検索すると書評論文も返る。書評は掲載誌名で照会されるため、`holdings` に無関係な雑誌が並ぶことがある。図書だけなら `--books` |
 
+2026-07-27、英語圏の文献と機関リポジトリを含むサーベイを通して確認した。
+以下は**ツール側を修正済み**。同じ失敗を人手で埋め直さないこと。
+
+| 事象 | 内容 |
+|---|---|
+| Unpaywall と日本語文献 | JaLC DOI と国内機関リポジトリをほぼカバーしない。**「Unpaywall が no_oa」は「OA でない」ではない**。実例: 東大の博士論文（doi:10.15083/0002006211, 全282頁, 誰でもDL可）が no_oa 判定。`oa.resolve` は CiNii/NDL が返すリポジトリ書誌ページの `citation_pdf_url` を見る2段構えに修正済み |
+| リポジトリの複数PDF | 機関リポジトリは本文・要旨・審査要旨を同じ書誌ページに並べる。ファイル名で本文を選ぶ（`_NOT_FULLTEXT`）。**要旨を本文として扱わないこと** |
+| CiNii が返す欄 | `prism:volume` `prism:number` `prism:startingPage/endingPage`、型付き `dc:identifier`（NCID / ISBN / URI）が入る。図書は `prism:publicationName` が無く `dc:publisher` |
+| KOSMOS 検索語の長さ | 英語は語の途中で切ると当たらない。実例: `Popular Music and Society` を24文字で切ると `Popular Music and Societ` になり誌にたどり着けなかった。CJK は24文字、ラテン文字は60文字＋語境界で切る |
+| 雑誌は「所蔵あり」で終わらない | 読めるかは**提供元ごとの収録範囲**で決まる。実例: Popular Music and Society は慶應「オンラインで利用可」だが EBSCO ASC は1996/06以降かつ**直近1年は利用不可**、T&F は1971–1996のみ。だから `holdings` は必要な巻号を併記する。**巻号なしでは可否を判断できない** |
+| 慶應未所蔵で止めない | 実例: Klein, *Selling Out*（Bloomsbury 2020）は慶應未所蔵だが国内3館が所蔵（国立音大／芸術文化観光専門職大／同志社）。`holdings` は NCID から CiNii Books の所蔵ページを出す。**「慶應に無い」は「入手不能」ではない** |
+| CiNii Books の API | `ci.nii.ac.jp/books/opensearch` は appid 無しで **403**。回避しない。所蔵確認は URL を組んで人が開く（`kosmos.cinii_books_url`） |
+| 書籍の目次 | Crossref に章 DOI があれば `sfc-search toc` で章題＋ページが取れる（実例: Klein は ISBN で9章）。**和書はほぼ空**。空のときは目次を推測せず「未確認」と書く |
+| ILL の区別 | 雑誌は取寄せ不可＝複写のみ（1論文1件）。図書は貸借で**館内利用限定**（1冊1件）。どちらも申込前に KOSMOS で学内所蔵の確認が必要で、受取キャンパスに所蔵があると申込めない。1件3,000円まで補助 |
+
 ## セットアップ
 
 ```bash
@@ -90,12 +105,19 @@ sfc-search cited-by <DOI>       # 被引用
 sfc-search refs <DOI>           # 参考文献
 
 sfc-search export --format md --with-abstract --out survey.md
-sfc-search holdings [--open 1-10] [--terms]   # 慶應所蔵の確認用
+sfc-search holdings [--open 1-10] [--terms]   # 慶應所蔵＋国内所蔵＋ILL導線
 sfc-search hold <番号> --library X --call Y | --none
 sfc-search fetch --limit 30     # OA本文のみ取得（契約物には触れない）
 sfc-search open <番号...>       # ブラウザで開く
-sfc-search ill                  # 所蔵なし・非OAを文献複写依頼形式で
+sfc-search ill                  # 複写（論文）と貸借（図書）に分けて依頼形式で
+
+sfc-search toc <番号|DOI|ISBN>  # 書籍の章立て（Crossref。和書はほぼ空）
+sfc-search verified <番号> --level {biblio,toc,abstract,partial,fulltext} --note "..."
 ```
+
+`verified` は**報告のための必須手順**。どこまで中身を見たかを記録しておき、
+`export --format md` の「確認範囲」に出す。記録していないものは `**未記録**` と
+出るので、報告前に埋まっているか確認する。
 
 直近の検索結果は `~/.local/state/sfc-search/last_search.json` に保存され、
 `export` `holdings` `open` `fetch` `ill` はこれを参照する。
@@ -110,6 +132,35 @@ sfc-search ill                  # 所蔵なし・非OAを文献複写依頼形�
 
 **契約フルテキストは人間がブラウザから正規に取得する。** エージェントは
 `open` で該当ページを開くところまで。
+
+## 「論文の穴を埋める文献を N 件」と頼まれたとき
+
+このリポジトリで最も多い依頼の形。次の順で進める。
+
+1. **先に対象論文を読む。** 何が主張で、どの主張が薄いのかを掴む前に検索しない
+2. 和文テーマなら `--source cinii --source ndl`。2語から始める。
+   **0件は「文献が無い」ではなく「語が多い」を先に疑う**（4語以上でほぼ0件）
+3. 英語圏も必ず当たる。日本語で0件の概念が英語では主題化されていることがある
+   （実例: 反商業主義規範は "selling out" 研究として英語圏に蓄積がある）
+4. `fetch` → OA 分を実際に読む。**読んだ範囲だけを読んだと言う**
+5. 図書は `toc`。空なら目次は未確認のまま扱う
+6. `holdings` → 慶應所蔵 → 無ければ国内所蔵 → 無ければ ILL。この順で必ず最後まで出す
+7. `verified` で各件の確認範囲を記録し、`export --format md` で書き出す
+
+報告には1件ごとに次の3点を必ず書く。ツールの出力がそのまま対応している。
+
+- **なぜその穴に効くのか**（1〜2文）
+- **入手方法**（OA なら URL / 慶應所蔵確認の KOSMOS URL / 国内所蔵 / ILL）
+- **確認範囲**（書誌のみ / 目次 / 抄録 / 本文の一部 / 本文読了）
+
+守ること:
+
+- **図書を候補から外さない。**「今すぐ本文が読めるか」を選定基準にしない。
+  OA 論文だけを並べるのは手抜きであって調査ではない
+- 本文が取れなかったものは、**タイトルから内容を推測せず「未確認」と書く**
+- 論旨に都合よく解釈しない。**合わない文献は「合わない」と言う。**
+  対象領域・年代・手法がずれている点は、効く理由と同じ場所に明記する
+- 該当する文献が本当に無いなら「無い」と報告する。近いものを穴埋めに仕立てない
 
 ## 検索結果の扱い
 

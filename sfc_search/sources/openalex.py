@@ -47,6 +47,10 @@ def _to_paper(w):
 
     openalex_id = (w.get("id") or "").rsplit("/", 1)[-1]
 
+    bib = w.get("biblio") or {}
+    first, last = bib.get("first_page") or "", bib.get("last_page") or ""
+    pages = f"{first}-{last}" if first and last else (first or "")
+
     return Paper(
         title=(w.get("display_name") or w.get("title") or "").strip(),
         authors=authors,
@@ -59,6 +63,9 @@ def _to_paper(w):
         is_oa=bool(oa.get("is_oa")),
         oa_url=oa_url,
         landing_url=loc.get("landing_page_url") or "",
+        volume=str(bib.get("volume") or ""),
+        issue=str(bib.get("issue") or ""),
+        pages=pages,
         sources=[NAME],
         ids={"openalex": openalex_id} if openalex_id else {},
     )

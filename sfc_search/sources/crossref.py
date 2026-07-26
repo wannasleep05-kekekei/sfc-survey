@@ -44,6 +44,7 @@ def _to_paper(it):
             break
 
     raw_type = it.get("type") or ""
+    isbns = it.get("ISBN") or []
     return Paper(
         title=_first(it.get("title")).strip(),
         authors=authors,
@@ -54,6 +55,10 @@ def _to_paper(it):
         abstract=_strip_jats(it.get("abstract") or ""),
         cited_by=int(it.get("is-referenced-by-count") or 0),
         landing_url=it.get("URL") or "",
+        volume=str(it.get("volume") or ""),
+        issue=str(it.get("issue") or ""),
+        pages=str(it.get("page") or ""),
+        isbn=(_first(isbns) or "").replace("-", ""),
         sources=[NAME],
         ids={"crossref": it.get("DOI") or ""},
     )
@@ -108,3 +113,54 @@ def by_doi(doi):
     if not data:
         return None
     return _to_paper((data or {}).get("message"))
+
+
+def _raw_by_doi(doi):
+    data = http.get_json(http.build_url(f"{BASE}/{norm_doi(doi)}",
+                                        {"mailto": config.require_contact()}))
+    return (data or {}).get("message") or {}
+
+
+def chapters(isbn=None, doi=None):
+    """
+    書籍の章立て（＝実質的な目次）を返す。[(章題, DOI, ページ範囲), ...]
+
+    Crossref に章ごとの DOI を登録している出版社なら、ISBN で引くと章が全部返る。
+    実測（2026-07-27）: Klein, Selling Out (Bloomsbury, 2020) は
+    ISBN 9781501339349 で本体1件＋章9件、いずれもページ範囲付きで取得できた。
+
+    日本の出版社は章 DOI をほぼ登録していないため、和書ではまず空になる。
+    その場合は目次を推測せず「未確認」として扱うこと（呼び出し側の責任）。
+    """
+    if not isbn and doi:
+        rec = _raw_by_doi(doi)
+        for v in (rec.get("ISBN") or []):
+            isbn = (v or "").replace("-", "")
+            if isbn:
+                break
+    isbn = (isbn or "").replace("-", "").strip()
+    if not isbn:
+        return []
+
+    data = http.get_json(http.build_url(BASE, {
+        "filter": f"isbn:{isbn}",
+        "rows": 100,
+        "select": "DOI,title,type,page",
+        "mailto": config.require_contact(),
+    })) or {}
+
+    out = []
+    for it in ((data.get("message") or {}).get("items") or []):
+        if (it.get("type") or "") == "book":
+            continue          # 本体レコードは章ではない
+        title = _first(it.get("title")).strip()
+        if not title:
+            continue
+        out.append((title, it.get("DOI") or "", str(it.get("page") or "")))
+
+    # ページ範囲の開始位置で並べる。DOI の連番は章順と一致しないことがある。
+    def _start(row):
+        head = (row[2] or "").split("-")[0].strip()
+        return int(head) if head.isdigit() else 10 ** 6
+    out.sort(key=_start)
+    return out

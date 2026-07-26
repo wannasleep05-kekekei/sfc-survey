@@ -24,7 +24,8 @@ import re
 import xml.etree.ElementTree as ET
 
 from .. import http
-from ..model import Paper, norm_year, clean_author
+from ..model import (Paper, norm_doi, norm_year, clean_author,
+                     REPO_HOST_HINTS as _REPO_HOST_HINTS)
 
 BASE = "https://ndlsearch.ndl.go.jp/api/opensearch"
 NAME = "ndl"
@@ -62,6 +63,30 @@ def _collect_fields(item):
             continue
         out.setdefault(name, []).append(text)
     return out
+
+
+def _see_also(item):
+    """
+    <rdfs:seeAlso rdf:resource="..."/> の URI を拾う。
+
+    値が本文ではなく属性に入っているため _collect_fields では落ちる。
+    ここに DOI や機関リポジトリ・CiNii の書誌ページが入っており、
+    NDL 由来のレコードで OA 本文に到達する唯一の手がかりになることがある。
+    """
+    out = []
+    for child in item:
+        if _local(child.tag) != "seeAlso":
+            continue
+        for k, v in child.attrib.items():
+            if _local(k) == "resource" and v:
+                out.append(v.strip())
+    return out
+
+
+# 「掲載誌：社会学研究科年報 2018 p.107-108」のような注記から巻号ページを取る。
+# NDL は論文の巻号ページを専用要素で返さないため、ここから拾うしかない。
+_PAGE_RE = re.compile(r"p\.?\s*(\d+)\s*[-–~〜]\s*(\d+)")
+_PAGE1_RE = re.compile(r"p\.?\s*(\d+)")
 
 
 def _one(f, key):
@@ -120,14 +145,34 @@ def _to_paper(item):
     if isbn:
         ids["isbn"] = isbn
 
+    note = _best_description(f)
+    m = _PAGE_RE.search(note) or _PAGE1_RE.search(note)
+    pages = ("-".join(m.groups()) if m and len(m.groups()) == 2
+             else (m.group(1) if m else ""))
+
+    doi, repo = "", ""
+    for uri in _see_also(item):
+        cand = norm_doi(uri)
+        if cand and not doi:
+            doi = cand
+            continue
+        low = uri.lower()
+        if not repo and any(h in low for h in _REPO_HOST_HINTS):
+            repo = uri
+
     return Paper(
         title=title,
         authors=authors,
         year=year,
         venue=_one(f, "publicationName") or _one(f, "seriesTitle") or _one(f, "publisher"),
         type=ptype,
-        abstract=_best_description(f),
+        doi=doi,
+        abstract=note,
         landing_url=link,
+        volume=volume,
+        pages=pages,
+        isbn=isbn.replace("-", "") if isbn else "",
+        repo_url=repo,
         sources=[NAME],
         ids={k: v for k, v in ids.items() if v},
     )
